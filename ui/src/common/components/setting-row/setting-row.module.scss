@@ -1,0 +1,25 @@
+.row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--vc-border);
+}
+
+.last {
+  border-bottom: none;
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+}
+
+.hint {
+  font-size: 13px;
+  color: var(--vc-muted);
+}
+
+.control {
+  flex: none;
+}

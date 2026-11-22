@@ -1,0 +1,22 @@
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--vc-border);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.rowText {
+  flex: 1;
+  min-width: 0;
+}
+
+.rowSub {
+  font-size: 12px;
+  color: var(--vc-muted);
+  word-break: break-all;
+}

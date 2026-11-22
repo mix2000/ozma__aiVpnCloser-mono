@@ -1,0 +1,32 @@
+# Pre-push: быстрые проверки по затронутой части — UI (lint, typecheck, test)
+# и Rust (clippy -D warnings, cargo test). Без e2e и без сети.
+# Обойти при необходимости: git push --no-verify
+set -e
+export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+unset PORT
+
+# Диапазон пушимых коммитов; новая ветка — от origin/main.
+RANGE="origin/main..HEAD"
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  [ -z "$local_sha" ] && continue
+  case "$remote_sha" in
+    *[!0]*) RANGE="$remote_sha..$local_sha" ;;
+    *) RANGE="origin/main..$local_sha" ;;
+  esac
+done
+CHANGED="$(git diff --name-only "$RANGE" 2>/dev/null || git ls-files)"
+[ -z "$CHANGED" ] && exit 0
+
+if printf '%s\n' "$CHANGED" | grep -q '^ui/'; then
+  echo "pre-push ui: lint + typecheck + test"
+  (cd ui && npm run lint && npm run typecheck && npm test)
+fi
+
+if printf '%s\n' "$CHANGED" | grep -qE '^(crates/|Cargo\.)'; then
+  echo "pre-push rust: clippy + test"
+  cargo clippy --locked --workspace --all-targets -- -D warnings
+  cargo test --locked --workspace
+fi
+
+echo "pre-push: сторожа"
+bash scripts/guards.sh

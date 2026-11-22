@@ -1,0 +1,39 @@
+.list {
+  display: flex;
+  flex-direction: column;
+}
+
+.bordered {
+  border: 1px solid var(--vc-border);
+  border-radius: 10px;
+  padding: 0 12px;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--vc-border);
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.empty {
+  padding: 12px 0;
+  text-align: center;
+  color: var(--vc-muted);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+}
+
+.sub {
+  font-size: 13px;
+  color: var(--vc-muted);
+  word-break: break-word;
+}

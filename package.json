@@ -1,0 +1,17 @@
+{
+  "name": "ozma-ai-vpn-closer-mono",
+  "private": true,
+  "version": "0.1.1",
+  "description": "ozma AI VPN Closer — корневые команды: проверки, хуки git, e2e. Код — crates/ (Rust) и ui/ (React).",
+  "scripts": {
+    "prepare": "husky",
+    "check": "bash scripts/check.sh",
+    "guards": "bash scripts/guards.sh",
+    "test": "npm test --prefix ui && cargo test --workspace",
+    "test:e2e": "npm run test:e2e --prefix ui",
+    "coverage": "npm run test:coverage --prefix ui && cargo llvm-cov --workspace --summary-only"
+  },
+  "devDependencies": {
+    "husky": "9.1.7"
+  }
+}

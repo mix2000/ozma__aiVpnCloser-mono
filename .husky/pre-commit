@@ -1,0 +1,29 @@
+# Pre-commit: формат и линт по staged-файлам + гард против секретов.
+# Только быстрые проверки, без тестов и без сети — иначе коммит станет
+# минутным и его начнут обходить `--no-verify`.
+set -e
+
+STAGED="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -z "$STAGED" ] && exit 0
+
+# --- Гард: секреты не коммитим (.env*, secrets.env, ключи и сертификаты). Шаблоны *.example можно.
+SECRETS="$(printf '%s\n' "$STAGED" \
+  | grep -E '(^|/)\.env($|\.)|(^|/)secrets\.env$|\.(pem|key|p12|pfx)$|(^|/)id_(rsa|ed25519)$' \
+  | grep -vE '\.example$' || true)"
+if [ -n "$SECRETS" ]; then
+  echo "pre-commit: в коммите секретные файлы — убери из индекса:"
+  printf '   %s\n' $SECRETS
+  echo "   (если это шаблон — переименуй в *.example)"
+  exit 1
+fi
+
+# --- UI: eslint --fix + prettier по staged (lint-staged из ui/).
+if printf '%s\n' "$STAGED" | grep -q '^ui/'; then
+  (cd ui && npx --no-install lint-staged --concurrent false)
+fi
+
+# --- Rust: формат (без правок — только проверка).
+if printf '%s\n' "$STAGED" | grep -qE '\.rs$'; then
+  export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
+  cargo fmt --all --check || { echo "pre-commit: cargo fmt --all"; exit 1; }
+fi
