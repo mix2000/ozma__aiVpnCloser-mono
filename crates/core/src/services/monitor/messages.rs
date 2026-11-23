@@ -15,6 +15,7 @@ pub const BODY_BACK_AFTER_CLOSE: &str = "Агентов можно запуск�
 pub const WHY_MONITORING_OFF: &str = "наблюдение выключено";
 pub const WHY_NOTHING_WATCHED: &str = "не выбрано, за чем следить";
 pub const WHY_SHUTDOWN: &str = "Программа завершается";
+pub const WHY_LEFTOVER: &str = "Остались замороженными с прошлого запуска";
 
 /// «VPN пропал: процесс xray — xray не запущен; …» — по непрошедшим проверкам.
 pub fn vpn_down(checks: &[CheckResult]) -> String {
@@ -90,6 +91,11 @@ pub fn killed_rest(n: usize) -> String {
 /// Разморозили при выключении наблюдения / выходе.
 pub fn released(why: &str, n: usize) -> String {
     format!("{why} — агенты разморожены ({})", procs_text(n))
+}
+
+/// Список замороженных не записался: после падения их не разморозить.
+pub fn frozen_not_saved(err: &str) -> String {
+    format!("Не удалось записать список замороженных: {err}")
 }
 
 /// Ошибка действия над pid.

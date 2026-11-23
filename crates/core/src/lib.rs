@@ -43,4 +43,5 @@ pub mod testing {
         Clock, FakeClock, Me, Monitor, MonitorParts, SystemClock, TickOutput,
     };
     pub use crate::services::owners::OwnerResolver;
+    pub use crate::storage::{FrozenFile, FrozenStore};
 }

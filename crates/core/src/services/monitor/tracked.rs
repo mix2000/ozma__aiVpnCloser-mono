@@ -1,6 +1,6 @@
 //! Процессы, над которыми монитор что-то сделал (заморозил, закрыл).
 
-use crate::models::{AgentProc, ProcInfo, TargetKind};
+use crate::models::{AgentProc, FrozenProc, ProcInfo, TargetKind};
 
 /// Процесс, над которым мы что-то сделали.
 #[derive(Debug, Clone)]
@@ -41,9 +41,14 @@ impl Tracked {
 
     /// Тот же процесс ещё жив (pid не переиспользован).
     pub fn alive_in(&self, procs: &[ProcInfo]) -> bool {
-        procs
-            .iter()
-            .any(|p| p.pid == self.pid && p.start_time == self.start_time)
+        self.as_frozen().alive_in(procs)
+    }
+
+    pub fn as_frozen(&self) -> FrozenProc {
+        FrozenProc {
+            pid: self.pid,
+            start_time: self.start_time,
+        }
     }
 }
 

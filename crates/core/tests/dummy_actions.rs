@@ -13,8 +13,8 @@ use vpn_closer_core::models::{
     Action, ActionReport, CheckResult, Config, ProcInfo, SelfCtx, Status, WatchItem,
 };
 use vpn_closer_core::testing::{
-    apply_with, CheckSource, FakeClock, Me, Monitor, MonitorParts, OsProcessControl, ProcSource,
-    ProcessControl, SysProcSource, SystemActor,
+    apply_with, CheckSource, FakeClock, FrozenFile, Me, Monitor, MonitorParts, OsProcessControl,
+    ProcSource, ProcessControl, SysProcSource, SystemActor,
 };
 
 const ME: u32 = 1;
@@ -181,7 +181,7 @@ impl CheckSource for VpnDown {
     }
 }
 
-fn monitor_for(pids: Vec<u32>, cfg: Config, clock: Arc<FakeClock>) -> Monitor {
+fn monitor_for(dir: &Path, pids: Vec<u32>, cfg: Config, clock: Arc<FakeClock>) -> Monitor {
     Monitor::new(
         cfg,
         MonitorParts {
@@ -189,6 +189,7 @@ fn monitor_for(pids: Vec<u32>, cfg: Config, clock: Arc<FakeClock>) -> Monitor {
             procs: Box::new(OnlyPids(SysProcSource::new(), pids)),
             actor: Box::new(SystemActor::new(Arc::new(OsProcessControl), ME)),
             clock,
+            frozen: Box::new(FrozenFile::new(dir.join("frozen.json"))),
             // Мы — родитель пустышек; «себя» указываем несуществующим pid, иначе
             // пустышки как наши потомки были бы исключены.
             me: Me::Fixed(SelfCtx { pid: 0, uid: None }),
@@ -214,7 +215,7 @@ fn monitor_freezes_then_closes_dummies() {
     let mut a = Dummy::spawn(dir.path(), "claude");
     let mut b = Dummy::spawn(dir.path(), "codex");
     let clock = Arc::new(FakeClock::default());
-    let mut m = monitor_for(vec![a.pid, b.pid], cfg(false), clock.clone());
+    let mut m = monitor_for(dir.path(), vec![a.pid, b.pid], cfg(false), clock.clone());
 
     let out = m.tick();
     assert_eq!(out.state.status, Status::Countdown, "{:?}", out.events);
@@ -235,7 +236,7 @@ fn monitor_dry_run_leaves_dummies_alone() {
     let dir = tempfile::tempdir().unwrap();
     let a = Dummy::spawn(dir.path(), "claude");
     let clock = Arc::new(FakeClock::default());
-    let mut m = monitor_for(vec![a.pid], cfg(true), clock.clone());
+    let mut m = monitor_for(dir.path(), vec![a.pid], cfg(true), clock.clone());
     let mut events = Vec::new();
     for _ in 0..4 {
         events.extend(m.tick().events);
@@ -254,6 +255,7 @@ fn shutdown_resumes_frozen_dummy() {
     let a = Dummy::spawn(dir.path(), "grok");
     let clock = Arc::new(FakeClock::default());
     let mut m = monitor_for(
+        dir.path(),
         vec![a.pid],
         Config {
             close_after_sec: 60,
@@ -265,4 +267,28 @@ fn shutdown_resumes_frozen_dummy() {
     a.expect_stopped();
     m.shutdown();
     a.expect_continued();
+}
+
+#[test]
+fn killed_program_leftover_resumed_on_next_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = Dummy::spawn(dir.path(), "grok");
+    let long = Config {
+        close_after_sec: 60,
+        ..cfg(false)
+    };
+    let clock = Arc::new(FakeClock::default());
+    let mut m = monitor_for(dir.path(), vec![a.pid], long.clone(), clock.clone());
+    m.tick();
+    a.expect_stopped();
+    // Падение: ни shutdown, ни разморозки.
+    drop(m);
+    let off = Config {
+        monitoring: false,
+        ..long
+    };
+    let mut m = monitor_for(dir.path(), vec![a.pid], off, clock);
+    m.tick();
+    a.expect_continued();
+    assert!(!dir.path().join("frozen.json").exists());
 }

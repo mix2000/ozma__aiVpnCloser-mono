@@ -81,7 +81,7 @@ impl Engine {
 
     /// Запустить монитор на платформе движка.
     pub fn start(&self) {
-        self.start_with(self.platform.monitor_parts());
+        self.start_with(self.platform.monitor_parts(&self.data_dir));
     }
 
     /// Запустить монитор с заданными зависимостями (тесты). Повторный вызов

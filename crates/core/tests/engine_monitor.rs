@@ -108,3 +108,22 @@ fn discover_and_test_targets_use_engine_platform() {
     assert_eq!(pids, vec![4242, 4243], "сессия и её потомок");
     assert!(targets[0].root && !targets[1].root);
 }
+
+#[test]
+fn leftover_from_killed_run_is_resumed_from_data_dir() {
+    let machine = Machine::new();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("frozen.json");
+    // 4242 — живой claude на подставной машине, 4243 — pid уже занят другим.
+    std::fs::write(
+        &file,
+        r#"[{"pid":4242,"startTime":1},{"pid":4243,"startTime":9}]"#,
+    )
+    .unwrap();
+    let e = Engine::with_platform(dir.path(), machine.parts()).unwrap();
+    e.start();
+    assert!(wait_for(|| machine.did(Action::Resume)));
+    assert!(wait_for(|| !file.exists()), "запись убрана");
+    assert_eq!(*machine.actions.lock().unwrap(), [(Action::Resume, 4242)]);
+    e.shutdown();
+}

@@ -1,8 +1,10 @@
-//! Файлы данных: папка приложения, атомарная запись, настройки, журнал.
+//! Файлы данных: папка приложения, атомарная запись, настройки, журнал,
+//! список замороженных.
 
 mod atomic;
 mod config_store;
 mod event_log;
+mod frozen_store;
 
 use std::path::Path;
 
@@ -10,9 +12,11 @@ use crate::error::{Error, Result};
 
 pub use config_store::{load_config, save_config, set_aside};
 pub use event_log::EventLog;
+pub use frozen_store::{FrozenFile, FrozenStore};
 
 pub const CONFIG_FILE: &str = "config.json";
 pub const EVENTS_FILE: &str = "events.jsonl";
+pub const FROZEN_FILE: &str = "frozen.json";
 
 /// Создать папку данных, если её нет.
 pub fn ensure_dir(dir: &Path) -> Result<()> {

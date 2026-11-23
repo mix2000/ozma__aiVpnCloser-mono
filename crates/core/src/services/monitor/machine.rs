@@ -79,6 +79,8 @@ impl Machine {
             }
             Phase::Ok => Transition::None,
             Phase::Countdown { deadline_ms } => {
+                // Останавливает отсчёт только подтверждённый VPN: «неизвестно»
+                // (проверки сбоят) — не повод выпустить трафик напрямую.
                 if verdict == Verdict::Up {
                     self.reset();
                     Transition::BackInCountdown

@@ -6,6 +6,7 @@ mod check;
 mod config;
 mod discovery;
 mod event;
+mod frozen;
 mod limits;
 mod process;
 mod state;
@@ -18,6 +19,7 @@ pub use discovery::{
     Discovery, IfAddr, IfOwner, NetInterface, OwnerConfidence, SystemVpn, VpnProcess,
 };
 pub use event::{Event, EventKind};
+pub use frozen::FrozenProc;
 pub use limits::{Limits, Range};
 pub use process::{base_name, ProcInfo};
 pub use state::{AgentInfo, AppState, Notice, Status, StatusColor};

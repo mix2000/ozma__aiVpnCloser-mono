@@ -4,10 +4,10 @@
 use std::sync::{Arc, Mutex};
 
 use vpn_closer_core::models::{
-    Action, ActionReport, CheckResult, Config, ProcInfo, SelfCtx, WatchItem,
+    Action, ActionReport, CheckResult, Config, FrozenProc, ProcInfo, SelfCtx, WatchItem,
 };
 use vpn_closer_core::testing::{
-    Actor, CheckSource, FakeClock, Me, Monitor, MonitorParts, ProcSource, TickOutput,
+    Actor, CheckSource, FakeClock, FrozenStore, Me, Monitor, MonitorParts, ProcSource, TickOutput,
 };
 
 pub type ActionLog = Arc<Mutex<Vec<(Action, Vec<u32>)>>>;
@@ -17,6 +17,8 @@ pub struct Shared {
     pub vpn: Arc<Mutex<Option<bool>>>,
     pub procs: Arc<Mutex<Vec<ProcInfo>>>,
     pub log: ActionLog,
+    /// «Файл» со списком замороженных: переживает перезапуск монитора.
+    pub frozen: Arc<Mutex<Vec<FrozenProc>>>,
 }
 
 pub struct FakeChecks(Arc<Mutex<Option<bool>>>);
@@ -27,6 +29,17 @@ impl CheckSource for FakeChecks {
             .iter()
             .map(|w| CheckResult::new(w.clone(), ok, "тест"))
             .collect()
+    }
+}
+
+pub struct FakeFrozen(Arc<Mutex<Vec<FrozenProc>>>);
+impl FrozenStore for FakeFrozen {
+    fn load(&self) -> Vec<FrozenProc> {
+        self.0.lock().unwrap().clone()
+    }
+    fn save(&mut self, list: &[FrozenProc]) -> std::io::Result<()> {
+        *self.0.lock().unwrap() = list.to_vec();
+        Ok(())
     }
 }
 
@@ -75,17 +88,24 @@ pub fn setup(cfg: Config) -> (Monitor, Shared, Arc<FakeClock>) {
     *sh.vpn.lock().unwrap() = Some(true);
     *sh.procs.lock().unwrap() = base_procs();
     let clock = Arc::new(FakeClock::default());
+    let m = monitor(cfg, &sh, clock.clone());
+    (m, sh, clock)
+}
+
+/// Монитор на этих источниках; повторный вызов — «перезапуск программы».
+pub fn monitor(cfg: Config, sh: &Shared, clock: Arc<FakeClock>) -> Monitor {
     let parts = MonitorParts {
         checks: Box::new(FakeChecks(sh.vpn.clone())),
         procs: Box::new(FakeProcs(sh.procs.clone())),
         actor: Box::new(RecActor(sh.log.clone())),
-        clock: clock.clone(),
+        clock,
+        frozen: Box::new(FakeFrozen(sh.frozen.clone())),
         me: Me::Fixed(SelfCtx {
             pid: 99_999,
             uid: Some("501".into()),
         }),
     };
-    (Monitor::new(cfg, parts), sh, clock)
+    Monitor::new(cfg, parts)
 }
 
 pub fn live_cfg() -> Config {

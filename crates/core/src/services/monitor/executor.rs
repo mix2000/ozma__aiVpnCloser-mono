@@ -6,19 +6,23 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use super::clock::Clock;
+use super::frozen_record::FrozenRecord;
 use super::messages as msg;
 use super::tracked::Tracked;
 use super::TickOutput;
 use crate::models::{
-    Action, ActionReport, AgentProc, CheckResult, Config, Event, EventKind, Notice, ProcInfo,
+    Action, ActionReport, AgentProc, CheckResult, Config, Event, EventKind, FrozenProc, Notice,
+    ProcInfo,
 };
 use crate::services::actions::Actor;
 use crate::services::agents::summary;
+use crate::storage::FrozenStore;
 
 pub struct Executor {
     actor: Box<dyn Actor>,
     clock: Arc<dyn Clock>,
     frozen: BTreeMap<u32, Tracked>,
+    record: FrozenRecord,
     /// Уже закрытые (или «закрыл бы» в режиме «только смотреть») за этот
     /// период без VPN (pid, start_time) — повторно не трогаем и не сообщаем.
     handled: HashSet<(u32, u64)>,
@@ -27,11 +31,16 @@ pub struct Executor {
 }
 
 impl Executor {
-    pub fn new(actor: Box<dyn Actor>, clock: Arc<dyn Clock>) -> Executor {
+    pub fn new(
+        actor: Box<dyn Actor>,
+        clock: Arc<dyn Clock>,
+        store: Box<dyn FrozenStore>,
+    ) -> Executor {
         Executor {
             actor,
             clock,
             frozen: BTreeMap::new(),
+            record: FrozenRecord::open(store),
             handled: HashSet::new(),
             pending_kill: Vec::new(),
         }
@@ -84,11 +93,34 @@ impl Executor {
             .is_some_and(|t| t.start_time == a.start_time)
     }
 
-    /// Заморожен по-настоящему (для `AgentInfo.frozen`).
+    /// Заморожен по-настоящему (для `AgentInfo.frozen`), в том числе прошлым запуском.
     pub fn is_really_frozen(&self, a: &AgentProc) -> bool {
-        self.frozen
-            .get(&a.pid)
-            .is_some_and(|t| t.real && t.start_time == a.start_time)
+        self.record.is_leftover(a)
+            || self
+                .frozen
+                .get(&a.pid)
+                .is_some_and(|t| t.real && t.start_time == a.start_time)
+    }
+
+    /// Остались ли замороженные прошлым запуском (программа упала или её убили).
+    pub fn has_leftover(&self) -> bool {
+        self.record.has_leftover()
+    }
+
+    /// Записать на диск, кто сейчас заморожен по-настоящему, и ещё `adding`.
+    pub fn sync_record(&mut self, adding: &[AgentProc], out: &mut TickOutput) {
+        let adding = adding.iter().map(|a| Tracked::from(a, true));
+        let real: Vec<FrozenProc> = self
+            .frozen
+            .values()
+            .filter(|t| t.real)
+            .cloned()
+            .chain(adding)
+            .map(|t| t.as_frozen())
+            .collect();
+        if let Err(e) = self.record.sync(real.into_iter()) {
+            self.event(out, EventKind::Error, msg::frozen_not_saved(&e));
+        }
     }
 
     /// Новый период: о закрытых ранее можно забыть.
@@ -147,6 +179,8 @@ impl Executor {
             return;
         }
         let pids: Vec<u32> = fresh.iter().map(|a| a.pid).collect();
+        // Сначала запись, потом заморозка: упав посередине, никого не забудем.
+        self.sync_record(&fresh, out);
         let rep = self.act(out, Action::Freeze, &pids);
         for a in &fresh {
             if rep.ok.contains(&a.pid) {
@@ -331,6 +365,24 @@ impl Executor {
         if !rep.ok.is_empty() {
             self.event(out, EventKind::Close, msg::killed_rest(rep.ok.len()));
         }
+    }
+
+    /// Разморозить оставшихся с прошлого запуска. Дальше — обычный путь: если
+    /// VPN нет, их тут же заморозит переход автомата.
+    pub fn release_leftover(&mut self, procs: &[ProcInfo], out: &mut TickOutput) {
+        let pids: Vec<u32> = self
+            .record
+            .take_leftover()
+            .iter()
+            .filter(|f| f.alive_in(procs))
+            .map(|f| f.pid)
+            .collect();
+        if pids.is_empty() {
+            return;
+        }
+        let rep = self.act(out, Action::Resume, &pids);
+        let text = msg::released(msg::WHY_LEFTOVER, rep.ok.len());
+        self.event(out, EventKind::Resume, text);
     }
 
     /// Разморозить всё, что заморожено по-настоящему (выключение наблюдения,
