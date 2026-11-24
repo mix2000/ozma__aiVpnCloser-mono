@@ -144,7 +144,7 @@ impl Monitor {
         } else {
             let verdict = combine(self.cfg.mode, &checks);
             let transition = self.machine.step(now, verdict, &self.cfg);
-            self.settle_leftover(now, verdict, &procs, &mut out);
+            self.settle_leftover(now, verdict, transition, &agents_now, &procs, &mut out);
             self.apply(transition, now, &checks, &agents_now, &procs, &mut out);
             self.machine.status(verdict)
         };
@@ -190,24 +190,41 @@ impl Monitor {
         }
     }
 
-    /// Замороженные прошлым запуском: пока не ясно, есть ли VPN, не отпускаем —
-    /// иначе их запросы уйдут напрямую.
+    /// Оставшиеся замороженными: пока не ясно, есть ли VPN, не отпускаем —
+    /// иначе их запросы уйдут напрямую. «Только смотреть» никого не держит.
     fn settle_leftover(
         &mut self,
         now: u64,
         verdict: Verdict,
+        transition: Transition,
+        agents_now: &[AgentProc],
         procs: &[ProcInfo],
         out: &mut TickOutput,
     ) {
+        let status = self.machine.status(verdict);
+        let undecided = matches!(status, Status::Down | Status::Unknown);
+        if !undecided || !self.executor.has_leftover() {
+            self.hold_since = None;
+        }
         if !self.executor.has_leftover() {
             return;
         }
-        let since = *self.hold_since.get_or_insert(now);
-        let undecided = matches!(self.machine.status(verdict), Status::Down | Status::Unknown);
-        let expired = verdict == Verdict::Unknown && now - since >= LEFTOVER_HOLD_MS;
-        if !undecided || expired {
-            self.executor.release_leftover(procs, out);
+        // Во время отсчёта и после закрытия не трогаем: VPN нет.
+        let release = if undecided {
+            let since = *self.hold_since.get_or_insert(now);
+            verdict == Verdict::Unknown && now - since >= LEFTOVER_HOLD_MS
+        } else {
+            status == Status::Ok || matches!(transition, Transition::Down { .. })
+        };
+        if !release && !self.cfg.dry_run {
+            return;
         }
+        let freezes = self.cfg.freeze_immediately && !self.cfg.dry_run;
+        if freezes && matches!(transition, Transition::Down { .. }) {
+            // Пишем до разморозки: между ней и новой заморозкой ждать диск нельзя.
+            self.executor.write_ahead(agents_now, out);
+        }
+        self.executor.release_leftover(procs, out);
     }
 
     /// Выполнить действия перехода.

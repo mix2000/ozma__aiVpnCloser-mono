@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use common::monitor::*;
 use vpn_closer_core::models::{Action, Config, EventKind, Status};
-use vpn_closer_core::testing::{FakeClock, Monitor};
+use vpn_closer_core::testing::{FakeClock, Monitor, TickOutput};
 
 /// Заморозить и «упасть»: новый монитор на том же хранилище, журнал действий пуст.
 fn crashed(cfg: Config) -> (Monitor, Shared, Arc<FakeClock>) {
@@ -96,9 +96,7 @@ fn monitoring_off_or_dry_run_or_shutdown_releases() {
         ..live_cfg()
     };
     let (mut m, sh, c) = crashed(dry);
-    for _ in 0..3 {
-        tick(&mut m, &c);
-    }
+    tick(&mut m, &c);
     assert_eq!(resumed(&sh).len(), 4, "«только смотреть» никого не держит");
 
     let (mut m, sh, _) = crashed(live_cfg());
@@ -121,4 +119,154 @@ fn closing_clears_record() {
     tick(&mut m, &c);
     assert_eq!(m.state().status, Status::Closed);
     assert!(sh.frozen.lock().unwrap().is_empty());
+}
+
+fn errors(out: &TickOutput) -> usize {
+    out.events
+        .iter()
+        .filter(|e| e.kind == EventKind::Error)
+        .count()
+}
+
+fn frozen_pids(sh: &Shared) -> Vec<u32> {
+    sh.frozen.lock().unwrap().iter().map(|f| f.pid).collect()
+}
+
+#[test]
+fn failed_resume_is_kept_and_retried() {
+    let (mut m, sh, c) = crashed(live_cfg());
+    set_vpn(&sh, Some(true));
+    *sh.stuck.lock().unwrap() = vec![300];
+    let out = tick(&mut m, &c);
+    assert_eq!(errors(&out), 1);
+    assert_eq!(frozen_pids(&sh), vec![300], "запись не потеряна");
+    let codex = |o: &TickOutput| o.state.agents.iter().any(|a| a.pid == 300 && a.frozen);
+    assert!(codex(&out), "в окне видно, что заморожен");
+    let out = tick(&mut m, &c);
+    assert_eq!(errors(&out), 0, "об ошибке — один раз");
+    assert_eq!(log(&sh).last().unwrap(), &(Action::Resume, vec![300]));
+    sh.stuck.lock().unwrap().clear();
+    let out = tick(&mut m, &c);
+    assert!(!codex(&out));
+    assert!(frozen_pids(&sh).is_empty());
+    let n = log(&sh).len();
+    tick(&mut m, &c);
+    assert_eq!(log(&sh).len(), n);
+}
+
+#[test]
+fn failed_resume_kept_after_vpn_back_and_shutdown() {
+    let (mut m, sh, c) = setup(live_cfg());
+    *sh.stuck.lock().unwrap() = vec![300];
+    set_vpn(&sh, Some(false));
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    set_vpn(&sh, Some(true));
+    let out = tick(&mut m, &c);
+    assert!(out.events.iter().any(|e| e.kind == EventKind::Resume));
+    assert_eq!(frozen_pids(&sh), vec![300]);
+    // Процесс умер — забыли.
+    sh.procs.lock().unwrap().retain(|p| p.pid != 300);
+    tick(&mut m, &c);
+    assert!(frozen_pids(&sh).is_empty());
+
+    let (mut m, sh, c) = setup(live_cfg());
+    *sh.stuck.lock().unwrap() = vec![300];
+    set_vpn(&sh, Some(false));
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    m.shutdown();
+    assert_eq!(frozen_pids(&sh), vec![300], "достанется следующему запуску");
+}
+
+#[test]
+fn stuck_one_is_not_resumed_during_countdown() {
+    let (mut m, sh, c) = crashed(live_cfg());
+    *sh.stuck.lock().unwrap() = vec![300];
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Countdown);
+    let l = log(&sh);
+    assert_eq!(
+        l[1],
+        (Action::Freeze, vec![200, 201, 202]),
+        "300 и так заморожен"
+    );
+    sh.stuck.lock().unwrap().clear();
+    for _ in 0..5 {
+        tick(&mut m, &c);
+    }
+    assert_eq!(log(&sh).len(), 2, "VPN нет — никого не отпускаем");
+    set_vpn(&sh, Some(true));
+    let out = tick(&mut m, &c);
+    assert!(out.state.agents.iter().all(|a| !a.frozen));
+    assert!(frozen_pids(&sh).is_empty());
+}
+
+#[test]
+fn nothing_is_written_between_resume_and_freeze() {
+    let (mut m, sh, c) = crashed(live_cfg());
+    // Новый агент, которого в записи ещё нет, и умерший из записи.
+    sh.procs.lock().unwrap().push(proc_(150, 1, "grok"));
+    sh.procs.lock().unwrap().retain(|p| p.pid != 202);
+    sh.writes.lock().unwrap().clear();
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    let l = log(&sh);
+    assert_eq!((l[0].0, l[1].0), (Action::Resume, Action::Freeze));
+    let writes = sh.writes.lock().unwrap().clone();
+    assert!(!writes.contains(&1), "между ними — без диска: {writes:?}");
+    assert_eq!(writes[0], 0, "записали до разморозки");
+    assert_eq!(frozen_pids(&sh), vec![150, 200, 201, 300]);
+}
+
+#[test]
+fn down_mixed_with_unknown_is_held_for_limited_time() {
+    let (mut m, sh, c) = crashed(live_cfg());
+    tick(&mut m, &c); // «VPN нет», ещё не подтверждено
+    set_vpn(&sh, None);
+    for _ in 0..29 {
+        tick(&mut m, &c);
+        assert!(log(&sh).is_empty());
+    }
+    set_vpn(&sh, Some(false));
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Countdown, "подтвердилось");
+    assert!(m.state().agents.iter().all(|a| a.frozen));
+
+    let (mut m, sh, c) = crashed(live_cfg());
+    tick(&mut m, &c);
+    set_vpn(&sh, None);
+    for _ in 0..30 {
+        tick(&mut m, &c);
+    }
+    assert_eq!(resumed(&sh).len(), 4);
+}
+
+#[test]
+fn restart_without_freeze_and_with_immediate_close() {
+    let no_freeze = Config {
+        freeze_immediately: false,
+        ..live_cfg()
+    };
+    let (mut m, sh, c) = crashed(no_freeze);
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Countdown);
+    assert_eq!(resumed(&sh).len(), 4, "замораживать не просили — отпущены");
+
+    let close_now = Config {
+        close_after_sec: 0,
+        ..live_cfg()
+    };
+    let (mut m, sh, c) = crashed(close_now);
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Closed);
+    let l = log(&sh);
+    assert_eq!(
+        l.last().unwrap(),
+        &(Action::Terminate, vec![202, 201, 200, 300])
+    );
+    assert!(frozen_pids(&sh).is_empty());
 }

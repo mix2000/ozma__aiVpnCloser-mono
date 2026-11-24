@@ -127,3 +127,17 @@ fn leftover_from_killed_run_is_resumed_from_data_dir() {
     assert_eq!(*machine.actions.lock().unwrap(), [(Action::Resume, 4242)]);
     e.shutdown();
 }
+
+#[test]
+fn broken_frozen_list_is_reported_and_set_aside() {
+    let machine = Machine::new();
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("frozen.json"), "[{").unwrap();
+    let e = Engine::with_platform(dir.path(), machine.parts()).unwrap();
+    e.start();
+    assert!(wait_for(|| e.recent_events(10).iter().any(|x| x.kind
+        == EventKind::Error
+        && x.message.contains("список замороженных"))));
+    assert!(dir.path().join("frozen.json.bad").exists());
+    e.shutdown();
+}

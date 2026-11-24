@@ -1,27 +1,48 @@
-//! Учёт замороженных на случай падения: что записано в хранилище и кто остался
-//! замороженным с прошлого запуска.
+//! Учёт замороженных на случай падения: что записано в хранилище и кого ещё
+//! предстоит отпустить — оставшихся с прошлого запуска и тех, кого не удалось
+//! разморозить с первого раза.
 
 use crate::models::{AgentProc, FrozenProc};
 use crate::storage::FrozenStore;
 
 pub struct FrozenRecord {
     store: Box<dyn FrozenStore>,
+    /// Что лежит в хранилище, по возрастанию pid.
     saved: Vec<FrozenProc>,
-    /// Заморожены прошлым запуском и ещё не отпущены.
+    /// Заморожены, но не отслеживаются как текущие: ждут разморозки.
     leftover: Vec<FrozenProc>,
+    /// О неудачной разморозке этих уже сообщили.
+    reported: Vec<FrozenProc>,
     /// Об ошибке записи уже сообщили — повторно, пока не получится, не пишем.
     failing: bool,
+    load_error: Option<String>,
+}
+
+fn sorted(mut list: Vec<FrozenProc>) -> Vec<FrozenProc> {
+    list.sort_by_key(|f| (f.pid, f.start_time));
+    list.dedup();
+    list
 }
 
 impl FrozenRecord {
-    pub fn open(store: Box<dyn FrozenStore>) -> FrozenRecord {
-        let leftover = store.load();
+    pub fn open(mut store: Box<dyn FrozenStore>) -> FrozenRecord {
+        let (list, load_error) = match store.load() {
+            Ok(list) => (sorted(list), None),
+            Err(e) => (Vec::new(), Some(e.to_string())),
+        };
         FrozenRecord {
             store,
-            saved: leftover.clone(),
-            leftover,
+            saved: list.clone(),
+            leftover: list,
+            reported: Vec::new(),
             failing: false,
+            load_error,
         }
+    }
+
+    /// Ошибка чтения при запуске — один раз.
+    pub fn take_load_error(&mut self) -> Option<String> {
+        self.load_error.take()
     }
 
     pub fn has_leftover(&self) -> bool {
@@ -38,15 +59,28 @@ impl FrozenRecord {
         std::mem::take(&mut self.leftover)
     }
 
+    /// Разморозить не удалось — попробуем ещё раз. `true` — об этом ещё не сообщали.
+    pub fn keep(&mut self, f: FrozenProc) -> bool {
+        if !self.leftover.contains(&f) {
+            self.leftover.push(f);
+        }
+        let first = !self.reported.contains(&f);
+        if first {
+            self.reported.push(f);
+        }
+        first
+    }
+
+    /// Все ли уже записаны: тогда перед заморозкой писать на диск не нужно.
+    pub fn covers(&self, list: &[FrozenProc]) -> bool {
+        list.iter().all(|f| self.saved.contains(f))
+    }
+
     /// Записать `frozen` и оставшихся, если список изменился. Текст ошибки —
     /// только о первой неудаче подряд.
     pub fn sync(&mut self, frozen: impl Iterator<Item = FrozenProc>) -> Result<(), String> {
-        let mut want = self.leftover.clone();
-        for f in frozen {
-            if !want.contains(&f) {
-                want.push(f);
-            }
-        }
+        let want = sorted(self.leftover.iter().copied().chain(frozen).collect());
+        self.reported.retain(|f| want.contains(f));
         if want == self.saved {
             return Ok(());
         }
@@ -69,11 +103,16 @@ impl FrozenRecord {
 mod tests {
     use super::*;
     use std::io;
+    use std::sync::{Arc, Mutex};
+
+    fn f(pid: u32) -> FrozenProc {
+        FrozenProc { pid, start_time: 1 }
+    }
 
     struct Broken;
     impl FrozenStore for Broken {
-        fn load(&self) -> Vec<FrozenProc> {
-            Vec::new()
+        fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
+            Err(io::Error::other("нет прав"))
         }
         fn save(&mut self, _: &[FrozenProc]) -> io::Result<()> {
             Err(io::Error::other("диск полон"))
@@ -81,15 +120,37 @@ mod tests {
     }
 
     #[test]
-    fn write_error_reported_once() {
+    fn errors_reported_once() {
         let mut r = FrozenRecord::open(Box::new(Broken));
-        let one = || {
-            std::iter::once(FrozenProc {
-                pid: 7,
-                start_time: 1,
-            })
-        };
-        assert_eq!(r.sync(one()), Err("диск полон".to_string()));
-        assert_eq!(r.sync(one()), Ok(()));
+        assert_eq!(r.take_load_error().as_deref(), Some("нет прав"));
+        assert_eq!(r.take_load_error(), None);
+        assert_eq!(r.sync([f(7)].into_iter()), Err("диск полон".to_string()));
+        assert_eq!(r.sync([f(7)].into_iter()), Ok(()));
+        assert!(r.keep(f(7)) && !r.keep(f(7)));
+        assert_eq!(r.take_leftover(), [f(7)]);
+    }
+
+    struct Counting(Arc<Mutex<usize>>);
+    impl FrozenStore for Counting {
+        fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
+            Ok(vec![f(9), f(3)])
+        }
+        fn save(&mut self, _: &[FrozenProc]) -> io::Result<()> {
+            *self.0.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn order_does_not_matter() {
+        let writes: Arc<Mutex<usize>> = Arc::default();
+        let mut r = FrozenRecord::open(Box::new(Counting(writes.clone())));
+        r.take_leftover();
+        r.sync([f(9), f(3), f(9)].into_iter()).unwrap();
+        r.sync([f(3), f(9)].into_iter()).unwrap();
+        assert_eq!(*writes.lock().unwrap(), 0, "тот же состав — не пишем");
+        assert!(r.covers(&[f(9)]) && !r.covers(&[f(9), f(4)]));
+        r.sync([f(3)].into_iter()).unwrap();
+        assert_eq!(*writes.lock().unwrap(), 1);
     }
 }

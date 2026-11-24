@@ -19,6 +19,10 @@ pub struct Shared {
     pub log: ActionLog,
     /// «Файл» со списком замороженных: переживает перезапуск монитора.
     pub frozen: Arc<Mutex<Vec<FrozenProc>>>,
+    /// Сколько действий уже было послано при каждой записи списка.
+    pub writes: Arc<Mutex<Vec<usize>>>,
+    /// Кого «не удаётся» разморозить.
+    pub stuck: Arc<Mutex<Vec<u32>>>,
 }
 
 pub struct FakeChecks(Arc<Mutex<Option<bool>>>);
@@ -32,13 +36,18 @@ impl CheckSource for FakeChecks {
     }
 }
 
-pub struct FakeFrozen(Arc<Mutex<Vec<FrozenProc>>>);
+pub struct FakeFrozen(
+    Arc<Mutex<Vec<FrozenProc>>>,
+    ActionLog,
+    Arc<Mutex<Vec<usize>>>,
+);
 impl FrozenStore for FakeFrozen {
-    fn load(&self) -> Vec<FrozenProc> {
-        self.0.lock().unwrap().clone()
+    fn load(&mut self) -> std::io::Result<Vec<FrozenProc>> {
+        Ok(self.0.lock().unwrap().clone())
     }
     fn save(&mut self, list: &[FrozenProc]) -> std::io::Result<()> {
         *self.0.lock().unwrap() = list.to_vec();
+        self.2.lock().unwrap().push(self.1.lock().unwrap().len());
         Ok(())
     }
 }
@@ -50,12 +59,20 @@ impl ProcSource for FakeProcs {
     }
 }
 
-pub struct RecActor(ActionLog);
+pub struct RecActor(ActionLog, Arc<Mutex<Vec<u32>>>);
 impl Actor for RecActor {
     fn apply(&mut self, action: Action, pids: &[u32]) -> ActionReport {
         self.0.lock().unwrap().push((action, pids.to_vec()));
+        let stuck = self.1.lock().unwrap().clone();
+        let fails = |p: &u32| action == Action::Resume && stuck.contains(p);
         ActionReport {
-            ok: pids.to_vec(),
+            ok: pids.iter().copied().filter(|p| !fails(p)).collect(),
+            failed: pids
+                .iter()
+                .copied()
+                .filter(|p| fails(p))
+                .map(|p| (p, "EPERM".to_string()))
+                .collect(),
             ..Default::default()
         }
     }
@@ -97,9 +114,13 @@ pub fn monitor(cfg: Config, sh: &Shared, clock: Arc<FakeClock>) -> Monitor {
     let parts = MonitorParts {
         checks: Box::new(FakeChecks(sh.vpn.clone())),
         procs: Box::new(FakeProcs(sh.procs.clone())),
-        actor: Box::new(RecActor(sh.log.clone())),
+        actor: Box::new(RecActor(sh.log.clone(), sh.stuck.clone())),
         clock,
-        frozen: Box::new(FakeFrozen(sh.frozen.clone())),
+        frozen: Box::new(FakeFrozen(
+            sh.frozen.clone(),
+            sh.log.clone(),
+            sh.writes.clone(),
+        )),
         me: Me::Fixed(SelfCtx {
             pid: 99_999,
             uid: Some("501".into()),

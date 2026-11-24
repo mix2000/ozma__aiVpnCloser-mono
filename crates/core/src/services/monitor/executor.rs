@@ -76,21 +76,43 @@ impl Executor {
         rep
     }
 
-    /// pid настоящих замороженных из `tracked`, которые ещё живы.
-    fn real_alive(tracked: &[Tracked], procs: &[ProcInfo]) -> Vec<u32> {
+    /// Разморозить. Кого не удалось, остаются в записи: попробуем на следующем
+    /// шаге или после перезапуска. Вернёт pid размороженных.
+    fn resume(&mut self, out: &mut TickOutput, list: &[FrozenProc]) -> Vec<u32> {
+        if list.is_empty() {
+            return Vec::new();
+        }
+        let pids: Vec<u32> = list.iter().map(|f| f.pid).collect();
+        let rep = self.actor.apply(Action::Resume, &pids);
+        for (pid, err) in &rep.failed {
+            let Some(f) = list.iter().find(|f| f.pid == *pid) else {
+                continue;
+            };
+            if self.record.keep(*f) {
+                let text = msg::action_failed(Action::Resume, *pid, err);
+                self.event(out, EventKind::Error, text);
+            }
+        }
+        rep.ok
+    }
+
+    /// Настоящие замороженные из `tracked`, которые ещё живы.
+    fn real_alive(tracked: &[Tracked], procs: &[ProcInfo]) -> Vec<FrozenProc> {
         tracked
             .iter()
             .filter(|t| t.real && t.alive_in(procs))
-            .map(|t| t.pid)
+            .map(Tracked::as_frozen)
             .collect()
     }
 
     // ------------------------------------------------------------ состояние
 
     fn is_frozen(&self, a: &AgentProc) -> bool {
-        self.frozen
-            .get(&a.pid)
-            .is_some_and(|t| t.start_time == a.start_time)
+        self.record.is_leftover(a)
+            || self
+                .frozen
+                .get(&a.pid)
+                .is_some_and(|t| t.start_time == a.start_time)
     }
 
     /// Заморожен по-настоящему (для `AgentInfo.frozen`), в том числе прошлым запуском.
@@ -102,9 +124,21 @@ impl Executor {
                 .is_some_and(|t| t.real && t.start_time == a.start_time)
     }
 
-    /// Остались ли замороженные прошлым запуском (программа упала или её убили).
+    /// Есть ли кого отпустить: замороженные прошлым запуском (программа упала
+    /// или её убили) и те, кого не удалось разморозить.
     pub fn has_leftover(&self) -> bool {
         self.record.has_leftover()
+    }
+
+    /// Записать тех, кого сейчас заморозим, если их в записи ещё нет.
+    pub fn write_ahead(&mut self, list: &[AgentProc], out: &mut TickOutput) {
+        let want: Vec<FrozenProc> = list
+            .iter()
+            .map(|a| Tracked::from(a, true).as_frozen())
+            .collect();
+        if !self.record.covers(&want) {
+            self.sync_record(list, out);
+        }
     }
 
     /// Записать на диск, кто сейчас заморожен по-настоящему, и ещё `adding`.
@@ -118,6 +152,9 @@ impl Executor {
             .chain(adding)
             .map(|t| t.as_frozen())
             .collect();
+        if let Some(e) = self.record.take_load_error() {
+            self.event(out, EventKind::Error, msg::frozen_not_loaded(&e));
+        }
         if let Err(e) = self.record.sync(real.into_iter()) {
             self.event(out, EventKind::Error, msg::frozen_not_saved(&e));
         }
@@ -180,7 +217,7 @@ impl Executor {
         }
         let pids: Vec<u32> = fresh.iter().map(|a| a.pid).collect();
         // Сначала запись, потом заморозка: упав посередине, никого не забудем.
-        self.sync_record(&fresh, out);
+        self.write_ahead(&fresh, out);
         let rep = self.act(out, Action::Freeze, &pids);
         for a in &fresh {
             if rep.ok.contains(&a.pid) {
@@ -211,20 +248,24 @@ impl Executor {
     pub fn vpn_back(&mut self, cfg: &Config, procs: &[ProcInfo], out: &mut TickOutput) {
         let tracked: Vec<Tracked> = std::mem::take(&mut self.frozen).into_values().collect();
         let real = Self::real_alive(&tracked, procs);
-        self.act(out, Action::Resume, &real);
-        let text = if real.is_empty() {
-            let roots: Vec<AgentProc> = tracked.iter().map(Tracked::as_agent).collect();
-            let would = (!tracked.is_empty()).then(|| summary(&roots));
+        let ok = self.resume(out, &real);
+        let text = if ok.is_empty() {
+            let dry: Vec<AgentProc> = tracked
+                .iter()
+                .filter(|t| !t.real)
+                .map(Tracked::as_agent)
+                .collect();
+            let would = (!dry.is_empty()).then(|| summary(&dry));
             msg::vpn_back(None, would.as_deref())
         } else {
             let resumed: Vec<AgentProc> = tracked
                 .iter()
-                .filter(|t| real.contains(&t.pid))
+                .filter(|t| ok.contains(&t.pid))
                 .map(Tracked::as_agent)
                 .collect();
             msg::vpn_back(Some(&summary(&resumed)), None)
         };
-        let kind = if real.is_empty() {
+        let kind = if ok.is_empty() {
             EventKind::VpnUp
         } else {
             EventKind::Resume
@@ -306,7 +347,7 @@ impl Executor {
             // Если что-то было заморожено по-настоящему до включения
             // «только смотреть» — не оставляем его замороженным навсегда.
             let real = Self::real_alive(&frozen, procs);
-            self.act(out, Action::Resume, &real);
+            self.resume(out, &real);
             self.event(out, EventKind::DryRun, msg::close(&what, block, true));
             return;
         }
@@ -367,22 +408,16 @@ impl Executor {
         }
     }
 
-    /// Разморозить оставшихся с прошлого запуска. Дальше — обычный путь: если
-    /// VPN нет, их тут же заморозит переход автомата.
+    /// Разморозить оставшихся. Дальше — обычный путь: если VPN нет, их тут же
+    /// заморозит переход автомата.
     pub fn release_leftover(&mut self, procs: &[ProcInfo], out: &mut TickOutput) {
-        let pids: Vec<u32> = self
-            .record
-            .take_leftover()
-            .iter()
-            .filter(|f| f.alive_in(procs))
-            .map(|f| f.pid)
-            .collect();
-        if pids.is_empty() {
-            return;
+        let mut list = self.record.take_leftover();
+        list.retain(|f| f.alive_in(procs));
+        let ok = self.resume(out, &list);
+        if !ok.is_empty() {
+            let text = msg::released(msg::WHY_LEFTOVER, ok.len());
+            self.event(out, EventKind::Resume, text);
         }
-        let rep = self.act(out, Action::Resume, &pids);
-        let text = msg::released(msg::WHY_LEFTOVER, rep.ok.len());
-        self.event(out, EventKind::Resume, text);
     }
 
     /// Разморозить всё, что заморожено по-настоящему (выключение наблюдения,
@@ -393,10 +428,9 @@ impl Executor {
         }
         let tracked: Vec<Tracked> = std::mem::take(&mut self.frozen).into_values().collect();
         let real = Self::real_alive(&tracked, procs);
-        if real.is_empty() {
-            return;
+        let ok = self.resume(out, &real);
+        if !ok.is_empty() {
+            self.event(out, EventKind::Resume, msg::released(why, ok.len()));
         }
-        let rep = self.act(out, Action::Resume, &real);
-        self.event(out, EventKind::Resume, msg::released(why, rep.ok.len()));
     }
 }
