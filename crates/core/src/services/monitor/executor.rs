@@ -152,10 +152,11 @@ impl Executor {
             .chain(adding)
             .map(|t| t.as_frozen())
             .collect();
+        let saved = self.record.sync(real.into_iter());
         if let Some(e) = self.record.take_load_error() {
             self.event(out, EventKind::Error, msg::frozen_not_loaded(&e));
         }
-        if let Err(e) = self.record.sync(real.into_iter()) {
+        if let Err(e) = saved {
             self.event(out, EventKind::Error, msg::frozen_not_saved(&e));
         }
     }
@@ -271,12 +272,12 @@ impl Executor {
             EventKind::Resume
         };
         self.event(out, kind, text);
-        Self::notice(
-            cfg,
-            out,
-            msg::TITLE_VPN_BACK,
-            msg::BODY_BACK_IN_COUNTDOWN.into(),
-        );
+        let body = if self.has_leftover() {
+            msg::BODY_BACK_STUCK
+        } else {
+            msg::BODY_BACK_IN_COUNTDOWN
+        };
+        Self::notice(cfg, out, msg::TITLE_VPN_BACK, body.into());
         self.forget_handled();
     }
 
@@ -313,6 +314,17 @@ impl Executor {
         }
     }
 
+    /// Застрявшие замороженными, которых ещё не закрывали и нет среди `known`.
+    fn stuck_besides(&self, known: &[AgentProc], procs: &[ProcInfo]) -> Vec<AgentProc> {
+        self.record
+            .leftover()
+            .iter()
+            .filter(|f| !self.handled.contains(&(f.pid, f.start_time)))
+            .filter(|f| !known.iter().any(|a| a.pid == f.pid))
+            .filter_map(|f| Tracked::helper(f, procs))
+            .collect()
+    }
+
     /// Закрыть список + всех замороженных (дети раньше родителей).
     pub fn close(
         &mut self,
@@ -330,6 +342,7 @@ impl Executor {
                 all.push(t.as_agent());
             }
         }
+        all.extend(self.stuck_besides(&all, procs));
         if all.is_empty() {
             if !block {
                 self.event(out, EventKind::Info, msg::NOTHING_TO_CLOSE.into());
@@ -378,6 +391,7 @@ impl Executor {
         for a in all {
             if rep.ok.contains(&a.pid) {
                 self.pending_kill.push((Tracked::from(a, true), deadline));
+                self.record.forget(a.pid);
             }
         }
         if cfg.kill_grace_sec == 0 {

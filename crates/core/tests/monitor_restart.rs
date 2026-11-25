@@ -204,6 +204,87 @@ fn stuck_one_is_not_resumed_during_countdown() {
 }
 
 #[test]
+fn stuck_one_is_closed_when_time_is_up() {
+    let cfg = Config {
+        close_after_sec: 2,
+        ..live_cfg()
+    };
+    let (mut m, sh, c) = crashed(cfg);
+    *sh.stuck.lock().unwrap() = vec![202, 300];
+    // Корень 200 умер: 202 остался сиротой и агентом больше не считается.
+    sh.procs
+        .lock()
+        .unwrap()
+        .retain(|p| p.pid != 200 && p.pid != 201);
+    sh.procs.lock().unwrap()[1].ppid = Some(1);
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Countdown);
+    assert_eq!(frozen_pids(&sh), vec![202, 300]);
+    tick(&mut m, &c);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Closed);
+    assert_eq!(
+        log(&sh).last().unwrap(),
+        &(Action::Terminate, vec![202, 300])
+    );
+    assert!(frozen_pids(&sh).is_empty(), "закрыты — забыли");
+    let n = log(&sh).len();
+    sh.procs.lock().unwrap().retain(|p| p.pid == 1);
+    tick(&mut m, &c);
+    assert_eq!(log(&sh).len(), n);
+}
+
+#[test]
+fn notice_tells_about_stuck_one() {
+    let body = |stuck: Vec<u32>| {
+        let (mut m, sh, c) = setup(live_cfg());
+        *sh.stuck.lock().unwrap() = stuck;
+        set_vpn(&sh, Some(false));
+        tick(&mut m, &c);
+        tick(&mut m, &c);
+        set_vpn(&sh, Some(true));
+        tick(&mut m, &c).notices[0].body.clone()
+    };
+    assert_eq!(body(vec![]), "Агенты продолжают работу");
+    assert!(body(vec![300]).starts_with("Не всех агентов"));
+}
+
+#[test]
+fn failed_write_is_not_retried_between_resume_and_freeze() {
+    let (mut m, sh, c) = crashed(live_cfg());
+    sh.procs.lock().unwrap().push(proc_(150, 1, "grok"));
+    tick(&mut m, &c);
+    *sh.disk_full.lock().unwrap() = true;
+    sh.writes.lock().unwrap().clear();
+    let out = tick(&mut m, &c);
+    assert_eq!(errors(&out), 1, "о неудаче — один раз");
+    let l = log(&sh);
+    assert_eq!((l[0].0, l[1].0), (Action::Resume, Action::Freeze));
+    assert_eq!(*sh.writes.lock().unwrap(), [0, 2], "до и после, не между");
+    *sh.disk_full.lock().unwrap() = false;
+    tick(&mut m, &c);
+    assert_eq!(frozen_pids(&sh), vec![150, 200, 201, 202, 300]);
+}
+
+#[test]
+fn dry_run_retries_stuck_one() {
+    let dry = Config {
+        dry_run: true,
+        ..live_cfg()
+    };
+    let (mut m, sh, c) = crashed(dry);
+    *sh.stuck.lock().unwrap() = vec![300];
+    tick(&mut m, &c);
+    assert_eq!(frozen_pids(&sh), vec![300]);
+    sh.stuck.lock().unwrap().clear();
+    tick(&mut m, &c);
+    assert_eq!(log(&sh).last().unwrap(), &(Action::Resume, vec![300]));
+    assert!(frozen_pids(&sh).is_empty());
+    assert!(log(&sh).iter().all(|(a, _)| *a == Action::Resume));
+}
+
+#[test]
 fn nothing_is_written_between_resume_and_freeze() {
     let (mut m, sh, c) = crashed(live_cfg());
     // Новый агент, которого в записи ещё нет, и умерший из записи.
@@ -238,6 +319,30 @@ fn down_mixed_with_unknown_is_held_for_limited_time() {
     tick(&mut m, &c);
     set_vpn(&sh, None);
     for _ in 0..30 {
+        tick(&mut m, &c);
+        assert!(log(&sh).is_empty());
+    }
+    tick(&mut m, &c);
+    assert_eq!(resumed(&sh).len(), 4);
+}
+
+#[test]
+fn one_unknown_after_long_down_does_not_release() {
+    let slow = Config {
+        confirm_failures: 100,
+        ..live_cfg()
+    };
+    let (mut m, sh, c) = crashed(slow);
+    for _ in 0..60 {
+        tick(&mut m, &c);
+    }
+    set_vpn(&sh, None);
+    tick(&mut m, &c);
+    assert_eq!(m.state().status, Status::Down);
+    assert!(log(&sh).is_empty(), "30 с — с первого «неизвестно»");
+    // Чередование не продлевает удержание бесконечно.
+    for i in 0..30 {
+        set_vpn(&sh, (i % 2 == 0).then_some(false));
         tick(&mut m, &c);
     }
     assert_eq!(resumed(&sh).len(), 4);

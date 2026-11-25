@@ -10,6 +10,8 @@ pub const TITLE_CLOSED: &str = "Агенты закрыты";
 pub const TITLE_BLOCKED: &str = "Агент запущен без VPN";
 
 pub const BODY_BACK_IN_COUNTDOWN: &str = "Агенты продолжают работу";
+pub const BODY_BACK_STUCK: &str =
+    "Не всех агентов удалось разморозить, попробую ещё раз. Подробности — в журнале";
 pub const BODY_BACK_AFTER_CLOSE: &str = "Агентов можно запускать снова";
 
 pub const WHY_MONITORING_OFF: &str = "наблюдение выключено";

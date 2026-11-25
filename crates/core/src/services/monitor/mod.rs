@@ -78,7 +78,7 @@ pub struct Monitor {
     me: Me,
     machine: Machine,
     executor: Executor,
-    /// С какого момента держим оставшихся с прошлого запуска.
+    /// С какого момента держим оставшихся, не зная, есть ли VPN.
     hold_since: Option<u64>,
     status: Option<Status>,
     last_change_at: Option<String>,
@@ -211,8 +211,10 @@ impl Monitor {
         }
         // Во время отсчёта и после закрытия не трогаем: VPN нет.
         let release = if undecided {
-            let since = *self.hold_since.get_or_insert(now);
-            verdict == Verdict::Unknown && now - since >= LEFTOVER_HOLD_MS
+            // Отсчёт — с первого «неизвестно»; «VPN нет» его не сбрасывает, иначе
+            // при чередовании держали бы вечно.
+            verdict == Verdict::Unknown
+                && now - *self.hold_since.get_or_insert(now) >= LEFTOVER_HOLD_MS
         } else {
             status == Status::Ok || matches!(transition, Transition::Down { .. })
         };

@@ -18,22 +18,35 @@ pub trait FrozenStore: Send {
 /// Список в файле; пустой список — файла нет.
 pub struct FrozenFile {
     path: PathBuf,
+    /// Файл есть, но не прочитан: перед записью поверх — отложить.
+    unread: bool,
 }
 
 impl FrozenFile {
     pub fn new(path: PathBuf) -> FrozenFile {
-        FrozenFile { path }
+        FrozenFile {
+            path,
+            unread: false,
+        }
     }
 }
 
 impl FrozenStore for FrozenFile {
-    /// Битый файл откладывается в `frozen.json.bad`.
+    /// Битый файл откладывается в `frozen.json.bad`. Пустой или из одних нулей
+    /// остаётся после отключения питания (пишем без fsync): этих процессов уже нет.
     fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
         let bytes = match std::fs::read(&self.path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
+            Err(e) => {
+                self.unread = true;
+                return Err(e);
+            }
         };
+        self.unread = false;
+        if bytes.iter().all(|b| *b == 0) {
+            return Ok(Vec::new());
+        }
         serde_json::from_slice(&bytes).map_err(|e| {
             set_aside(&self.path);
             e.into()
@@ -41,6 +54,9 @@ impl FrozenStore for FrozenFile {
     }
 
     fn save(&mut self, list: &[FrozenProc]) -> io::Result<()> {
+        if std::mem::take(&mut self.unread) {
+            set_aside(&self.path);
+        }
         if list.is_empty() {
             return match std::fs::remove_file(&self.path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -76,5 +92,27 @@ mod tests {
         assert!(f.load().is_err(), "битый — не молчим");
         assert!(!path.exists() && dir.path().join("frozen.json.bad").exists());
         assert!(f.load().unwrap().is_empty());
+        for lost in [&b""[..], &[0; 16]] {
+            std::fs::write(&path, lost).unwrap();
+            assert!(f.load().unwrap().is_empty(), "питание отключали");
+        }
+    }
+
+    #[test]
+    fn unread_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("frozen.json");
+        // Каталог вместо файла: чтение не удаётся на любой ОС.
+        std::fs::create_dir(&path).unwrap();
+        let mut f = FrozenFile::new(path.clone());
+        assert!(f.load().is_err());
+        assert!(path.exists(), "само чтение ничего не откладывает");
+        let list = [FrozenProc {
+            pid: 7,
+            start_time: 100,
+        }];
+        f.save(&list).unwrap();
+        assert!(dir.path().join("frozen.json.bad").is_dir());
+        assert_eq!(f.load().unwrap(), list);
     }
 }

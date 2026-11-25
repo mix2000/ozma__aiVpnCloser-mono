@@ -9,6 +9,8 @@ pub struct FrozenRecord {
     store: Box<dyn FrozenStore>,
     /// Что лежит в хранилище, по возрастанию pid.
     saved: Vec<FrozenProc>,
+    /// Что пробовали записать последним (запись могла и не удаться).
+    tried: Vec<FrozenProc>,
     /// Заморожены, но не отслеживаются как текущие: ждут разморозки.
     leftover: Vec<FrozenProc>,
     /// О неудачной разморозке этих уже сообщили.
@@ -16,6 +18,8 @@ pub struct FrozenRecord {
     /// Об ошибке записи уже сообщили — повторно, пока не получится, не пишем.
     failing: bool,
     load_error: Option<String>,
+    /// Прочитать пока не удалось: повторяем, пока сами не записали поверх.
+    unread: bool,
 }
 
 fn sorted(mut list: Vec<FrozenProc>) -> Vec<FrozenProc> {
@@ -33,11 +37,30 @@ impl FrozenRecord {
         FrozenRecord {
             store,
             saved: list.clone(),
+            tried: list.clone(),
             leftover: list,
             reported: Vec::new(),
             failing: false,
+            unread: load_error.is_some(),
             load_error,
         }
+    }
+
+    /// Ещё раз прочитать то, что при запуске не прочиталось (файл был занят).
+    fn reload(&mut self) {
+        if !self.unread {
+            return;
+        }
+        let Ok(list) = self.store.load() else {
+            return;
+        };
+        self.unread = false;
+        if list.is_empty() {
+            return;
+        }
+        self.load_error = None;
+        self.saved = sorted(list);
+        self.leftover.extend(&self.saved);
     }
 
     /// Ошибка чтения при запуске — один раз.
@@ -53,6 +76,15 @@ impl FrozenRecord {
         self.leftover
             .iter()
             .any(|f| f.pid == a.pid && f.start_time == a.start_time)
+    }
+
+    pub fn leftover(&self) -> &[FrozenProc] {
+        &self.leftover
+    }
+
+    /// Закрыт — размораживать больше незачем.
+    pub fn forget(&mut self, pid: u32) {
+        self.leftover.retain(|f| f.pid != pid);
     }
 
     pub fn take_leftover(&mut self) -> Vec<FrozenProc> {
@@ -72,15 +104,18 @@ impl FrozenRecord {
     }
 
     /// Все ли уже записаны: тогда перед заморозкой писать на диск не нужно.
+    /// Неудачную запись тоже не повторяем: следующая попытка — в конце шага.
     pub fn covers(&self, list: &[FrozenProc]) -> bool {
-        list.iter().all(|f| self.saved.contains(f))
+        list.iter().all(|f| self.tried.contains(f))
     }
 
     /// Записать `frozen` и оставшихся, если список изменился. Текст ошибки —
     /// только о первой неудаче подряд.
     pub fn sync(&mut self, frozen: impl Iterator<Item = FrozenProc>) -> Result<(), String> {
+        self.reload();
         let want = sorted(self.leftover.iter().copied().chain(frozen).collect());
         self.reported.retain(|f| want.contains(f));
+        self.tried.clone_from(&want);
         if want == self.saved {
             return Ok(());
         }
@@ -88,6 +123,7 @@ impl FrozenRecord {
             Ok(()) => {
                 self.saved = want;
                 self.failing = false;
+                self.unread = false;
                 Ok(())
             }
             Err(_) if self.failing => Ok(()),
@@ -126,8 +162,37 @@ mod tests {
         assert_eq!(r.take_load_error(), None);
         assert_eq!(r.sync([f(7)].into_iter()), Err("диск полон".to_string()));
         assert_eq!(r.sync([f(7)].into_iter()), Ok(()));
+        assert!(r.covers(&[f(7)]), "второй раз перед заморозкой не пробуем");
         assert!(r.keep(f(7)) && !r.keep(f(7)));
         assert_eq!(r.take_leftover(), [f(7)]);
+    }
+
+    /// Первое чтение не удаётся (файл занят), дальше — как есть.
+    struct Busy(bool);
+    impl FrozenStore for Busy {
+        fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
+            if std::mem::replace(&mut self.0, false) {
+                return Err(io::Error::other("занят"));
+            }
+            Ok(vec![f(9), f(3)])
+        }
+        fn save(&mut self, list: &[FrozenProc]) -> io::Result<()> {
+            assert!(list.contains(&f(3)) && list.contains(&f(9)), "{list:?}");
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unread_list_is_read_again_before_overwriting() {
+        let mut r = FrozenRecord::open(Box::new(Busy(true)));
+        assert!(!r.has_leftover());
+        r.sync([f(7)].into_iter()).unwrap();
+        assert_eq!(r.leftover(), [f(3), f(9)]);
+        assert_eq!(r.take_load_error(), None, "прочитали — не тревожим");
+        r.sync([f(7)].into_iter()).unwrap();
+        assert_eq!(r.leftover().len(), 2, "второй раз не читаем");
+        r.forget(3);
+        assert_eq!(r.leftover(), [f(9)]);
     }
 
     struct Counting(Arc<Mutex<usize>>);

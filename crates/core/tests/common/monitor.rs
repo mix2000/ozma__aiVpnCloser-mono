@@ -23,6 +23,8 @@ pub struct Shared {
     pub writes: Arc<Mutex<Vec<usize>>>,
     /// Кого «не удаётся» разморозить.
     pub stuck: Arc<Mutex<Vec<u32>>>,
+    /// Список замороженных «не записывается».
+    pub disk_full: Arc<Mutex<bool>>,
 }
 
 pub struct FakeChecks(Arc<Mutex<Option<bool>>>);
@@ -40,14 +42,18 @@ pub struct FakeFrozen(
     Arc<Mutex<Vec<FrozenProc>>>,
     ActionLog,
     Arc<Mutex<Vec<usize>>>,
+    Arc<Mutex<bool>>,
 );
 impl FrozenStore for FakeFrozen {
     fn load(&mut self) -> std::io::Result<Vec<FrozenProc>> {
         Ok(self.0.lock().unwrap().clone())
     }
     fn save(&mut self, list: &[FrozenProc]) -> std::io::Result<()> {
-        *self.0.lock().unwrap() = list.to_vec();
         self.2.lock().unwrap().push(self.1.lock().unwrap().len());
+        if *self.3.lock().unwrap() {
+            return Err(std::io::Error::other("диск полон"));
+        }
+        *self.0.lock().unwrap() = list.to_vec();
         Ok(())
     }
 }
@@ -120,6 +126,7 @@ pub fn monitor(cfg: Config, sh: &Shared, clock: Arc<FakeClock>) -> Monitor {
             sh.frozen.clone(),
             sh.log.clone(),
             sh.writes.clone(),
+            sh.disk_full.clone(),
         )),
         me: Me::Fixed(SelfCtx {
             pid: 99_999,

@@ -39,6 +39,22 @@ impl Tracked {
         }
     }
 
+    /// О замороженном известны только pid и время запуска (агентом он больше не
+    /// считается): вспомогательный процесс. `None` — уже не жив.
+    pub fn helper(f: &FrozenProc, procs: &[ProcInfo]) -> Option<AgentProc> {
+        let p = procs
+            .iter()
+            .find(|p| p.pid == f.pid && p.start_time == f.start_time)?;
+        Some(AgentProc {
+            target: TargetKind::Grok,
+            pid: p.pid,
+            name: p.name.clone(),
+            start_time: p.start_time,
+            root: p.pid,
+            depth: 1,
+        })
+    }
+
     /// Тот же процесс ещё жив (pid не переиспользован).
     pub fn alive_in(&self, procs: &[ProcInfo]) -> bool {
         self.as_frozen().alive_in(procs)
