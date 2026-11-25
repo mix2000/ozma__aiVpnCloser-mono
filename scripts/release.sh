@@ -2,7 +2,7 @@
 # Локальная сборка релиза ozma AI VPN Closer для macOS (arm64, x64) и Windows x64.
 #
 #   scripts/release.sh                 # собрать всё в dist/
-#   scripts/release.sh --publish       # собрать и выложить в GitHub Release vX.Y.Z
+#   scripts/release.sh --publish       # собрать, дождаться CI и выложить в GitHub Release vX.Y.Z
 #   scripts/release.sh --create-tag    # создать тег vX.Y.Z на HEAD, если его нет
 #   scripts/release.sh --allow-dirty   # собрать из незакоммиченного дерева (без --publish)
 #   scripts/release.sh --only mac|win  # только одна платформа
@@ -162,6 +162,9 @@ if [ "$PUBLISH" = 0 ]; then
   echo "Собрано в dist/. Выложить: scripts/release.sh --publish"
   exit 0
 fi
+
+step "CI для ${HEAD_SHA:0:7}"
+bash "$ROOT/scripts/wait-ci.sh" "$HEAD_SHA" || die "CI не подтвердил коммит — не публикую (файлы в dist/)"
 
 step "GitHub Release $TAG"
 if gh release view "$TAG" >/dev/null 2>&1; then

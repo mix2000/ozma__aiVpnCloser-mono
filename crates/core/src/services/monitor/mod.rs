@@ -145,8 +145,12 @@ impl Monitor {
             let verdict = combine(self.cfg.mode, &checks);
             let transition = self.machine.step(now, verdict, &self.cfg);
             self.settle_leftover(now, verdict, transition, &agents_now, &procs, &mut out);
+            let status = self.machine.status(verdict);
+            if status == Status::Closed {
+                self.executor.retry_close(&self.cfg, now, &procs, &mut out);
+            }
             self.apply(transition, now, &checks, &agents_now, &procs, &mut out);
-            self.machine.status(verdict)
+            status
         };
 
         self.executor.sync_record(&[], &mut out);

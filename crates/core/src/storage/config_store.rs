@@ -23,14 +23,14 @@ pub fn load_config(path: &Path) -> Result<Config> {
 }
 
 /// Отложить битый конфиг в `<имя>.bad` рядом; вернуть новый путь.
-pub fn set_aside(path: &Path) -> PathBuf {
+pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let bad = path.with_file_name(format!("{name}.bad"));
-    let _ = std::fs::rename(path, &bad);
-    bad
+    std::fs::rename(path, &bad)?;
+    Ok(bad)
 }
 
 /// Записать атомарно (tmp + rename).
@@ -59,7 +59,7 @@ mod tests {
         save_config(&c, &path).unwrap();
         assert_eq!(load_config(&path).unwrap(), c);
         std::fs::write(&path, "{").unwrap();
-        let bad = set_aside(&path);
+        let bad = set_aside(&path).unwrap();
         assert!(bad.ends_with("config.json.bad") && bad.exists() && !path.exists());
         std::fs::write(&path, "{").unwrap();
         let err = load_config(&path).unwrap_err().to_string();

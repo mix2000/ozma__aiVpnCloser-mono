@@ -43,7 +43,8 @@ pub fn guard(pid: u32, self_pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Выполнить действие над каждым pid по порядку через `control`.
+/// Выполнить действие над каждым pid по порядку через `control`. Процесс, который
+/// успел завершиться сам, — не ошибка: его нет ни в `ok`, ни в `failed`.
 /// `dry_run` — ничего не слать.
 pub fn apply_with(
     control: &dyn ProcessControl,
@@ -66,6 +67,7 @@ pub fn apply_with(
         });
         match res {
             Ok(()) => rep.ok.push(pid),
+            Err(_) if guard(pid, self_pid).is_ok() && !control.is_alive(pid) => {}
             Err(e) => rep.failed.push((pid, e)),
         }
     }
@@ -78,20 +80,20 @@ mod tests {
     use std::io;
     use std::sync::Mutex;
 
-    /// Записывает вызовы, pid 13 «падает».
+    /// Записывает вызовы, pid 13 «падает», 14 — уже завершился.
     #[derive(Default)]
     struct Rec(Mutex<Vec<(Action, u32)>>);
     impl ProcessControl for Rec {
         fn apply(&self, action: Action, pid: u32) -> io::Result<()> {
             self.0.lock().unwrap().push((action, pid));
-            if pid == 13 {
+            if pid == 13 || pid == 14 {
                 Err(io::Error::other("нет такого процесса"))
             } else {
                 Ok(())
             }
         }
-        fn is_alive(&self, _: u32) -> bool {
-            true
+        fn is_alive(&self, pid: u32) -> bool {
+            pid != 14
         }
     }
 
@@ -115,11 +117,11 @@ mod tests {
     #[test]
     fn order_and_errors_reported() {
         let rec = Rec::default();
-        let rep = apply_with(&rec, Action::Freeze, &[10, 13, 11], false, 1);
+        let rep = apply_with(&rec, Action::Freeze, &[10, 13, 14, 11], false, 1);
         assert_eq!(rep.ok, vec![10, 11]);
         assert_eq!(rep.failed, vec![(13, "нет такого процесса".to_string())]);
         let calls: Vec<u32> = rec.0.lock().unwrap().iter().map(|c| c.1).collect();
-        assert_eq!(calls, [10, 13, 11]);
+        assert_eq!(calls, [10, 13, 14, 11]);
     }
 
     #[test]

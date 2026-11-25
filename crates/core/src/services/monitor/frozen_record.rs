@@ -91,11 +91,16 @@ impl FrozenRecord {
         std::mem::take(&mut self.leftover)
     }
 
-    /// Разморозить не удалось — попробуем ещё раз. `true` — об этом ещё не сообщали.
-    pub fn keep(&mut self, f: FrozenProc) -> bool {
+    /// Остался замороженным: отпустим, когда будет можно.
+    pub fn hold(&mut self, f: FrozenProc) {
         if !self.leftover.contains(&f) {
             self.leftover.push(f);
         }
+    }
+
+    /// Разморозить не удалось — попробуем ещё раз. `true` — об этом ещё не сообщали.
+    pub fn keep(&mut self, f: FrozenProc) -> bool {
+        self.hold(f);
         let first = !self.reported.contains(&f);
         if first {
             self.reported.push(f);
@@ -119,7 +124,7 @@ impl FrozenRecord {
         if want == self.saved {
             return Ok(());
         }
-        match self.store.save(&want) {
+        match self.store.save(&want, self.unread) {
             Ok(()) => {
                 self.saved = want;
                 self.failing = false;
@@ -150,7 +155,7 @@ mod tests {
         fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
             Err(io::Error::other("нет прав"))
         }
-        fn save(&mut self, _: &[FrozenProc]) -> io::Result<()> {
+        fn save(&mut self, _: &[FrozenProc], _: bool) -> io::Result<()> {
             Err(io::Error::other("диск полон"))
         }
     }
@@ -176,7 +181,7 @@ mod tests {
             }
             Ok(vec![f(9), f(3)])
         }
-        fn save(&mut self, list: &[FrozenProc]) -> io::Result<()> {
+        fn save(&mut self, list: &[FrozenProc], _: bool) -> io::Result<()> {
             assert!(list.contains(&f(3)) && list.contains(&f(9)), "{list:?}");
             Ok(())
         }
@@ -200,7 +205,7 @@ mod tests {
         fn load(&mut self) -> io::Result<Vec<FrozenProc>> {
             Ok(vec![f(9), f(3)])
         }
-        fn save(&mut self, _: &[FrozenProc]) -> io::Result<()> {
+        fn save(&mut self, _: &[FrozenProc], _: bool) -> io::Result<()> {
             *self.0.lock().unwrap() += 1;
             Ok(())
         }

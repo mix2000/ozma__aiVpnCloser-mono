@@ -23,6 +23,8 @@ pub struct Shared {
     pub writes: Arc<Mutex<Vec<usize>>>,
     /// Кого «не удаётся» разморозить.
     pub stuck: Arc<Mutex<Vec<u32>>>,
+    /// Кого «не удаётся» закрыть.
+    pub unkillable: Arc<Mutex<Vec<u32>>>,
     /// Список замороженных «не записывается».
     pub disk_full: Arc<Mutex<bool>>,
 }
@@ -48,7 +50,7 @@ impl FrozenStore for FakeFrozen {
     fn load(&mut self) -> std::io::Result<Vec<FrozenProc>> {
         Ok(self.0.lock().unwrap().clone())
     }
-    fn save(&mut self, list: &[FrozenProc]) -> std::io::Result<()> {
+    fn save(&mut self, list: &[FrozenProc], _: bool) -> std::io::Result<()> {
         self.2.lock().unwrap().push(self.1.lock().unwrap().len());
         if *self.3.lock().unwrap() {
             return Err(std::io::Error::other("диск полон"));
@@ -65,12 +67,17 @@ impl ProcSource for FakeProcs {
     }
 }
 
-pub struct RecActor(ActionLog, Arc<Mutex<Vec<u32>>>);
+pub struct RecActor(ActionLog, Arc<Mutex<Vec<u32>>>, Arc<Mutex<Vec<u32>>>);
 impl Actor for RecActor {
     fn apply(&mut self, action: Action, pids: &[u32]) -> ActionReport {
         self.0.lock().unwrap().push((action, pids.to_vec()));
         let stuck = self.1.lock().unwrap().clone();
-        let fails = |p: &u32| action == Action::Resume && stuck.contains(p);
+        let unkillable = self.2.lock().unwrap().clone();
+        let fails = |p: &u32| match action {
+            Action::Resume => stuck.contains(p),
+            Action::Terminate => unkillable.contains(p),
+            _ => false,
+        };
         ActionReport {
             ok: pids.iter().copied().filter(|p| !fails(p)).collect(),
             failed: pids
@@ -120,7 +127,11 @@ pub fn monitor(cfg: Config, sh: &Shared, clock: Arc<FakeClock>) -> Monitor {
     let parts = MonitorParts {
         checks: Box::new(FakeChecks(sh.vpn.clone())),
         procs: Box::new(FakeProcs(sh.procs.clone())),
-        actor: Box::new(RecActor(sh.log.clone(), sh.stuck.clone())),
+        actor: Box::new(RecActor(
+            sh.log.clone(),
+            sh.stuck.clone(),
+            sh.unkillable.clone(),
+        )),
         clock,
         frozen: Box::new(FakeFrozen(
             sh.frozen.clone(),

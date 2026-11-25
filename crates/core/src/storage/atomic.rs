@@ -4,15 +4,25 @@ use std::io::Write;
 use std::path::Path;
 
 pub fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    write(path, data, true)
+    write(path, data, true, || Ok(()))
 }
 
 /// Без fsync: переживает падение программы, но не отключение питания.
-pub fn write_atomic_no_sync(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    write(path, data, false)
+/// `before` — перед самой заменой, когда новое уже записано; ошибка — не заменяем.
+pub fn write_atomic_no_sync(
+    path: &Path,
+    data: &[u8],
+    before: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    write(path, data, false, before)
 }
 
-fn write(path: &Path, data: &[u8], sync: bool) -> std::io::Result<()> {
+fn write(
+    path: &Path,
+    data: &[u8],
+    sync: bool,
+    before: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
     let name = path
@@ -27,7 +37,7 @@ fn write(path: &Path, data: &[u8], sync: bool) -> std::io::Result<()> {
             f.sync_all()?;
         }
     }
-    match std::fs::rename(&tmp, path) {
+    match before().and_then(|()| std::fs::rename(&tmp, path)) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -45,8 +55,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a/b.json");
         write_atomic(&p, b"1").unwrap();
-        write_atomic_no_sync(&p, b"22").unwrap();
+        write_atomic_no_sync(&p, b"22", || Ok(())).unwrap();
         assert_eq!(std::fs::read(&p).unwrap(), b"22");
+        let stop = || Err(std::io::Error::other("нельзя"));
+        assert!(write_atomic_no_sync(&p, b"333", stop).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), b"22", "не заменили");
         let leftovers: Vec<_> = std::fs::read_dir(p.parent().unwrap())
             .unwrap()
             .flatten()

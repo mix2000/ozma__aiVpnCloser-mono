@@ -220,14 +220,14 @@ fn load_or_set_aside(data_dir: &Path, events: &mut EventLog, platform: &Platform
     match storage::load_config(&cfg_path).and_then(validate) {
         Ok(c) => c,
         Err(err) => {
-            let bad = storage::set_aside(&cfg_path);
+            let aside = match storage::set_aside(&cfg_path) {
+                Ok(bad) => format!("Файл отложен в {}", bad.display()),
+                Err(e) => format!("Отложить файл не удалось ({e})"),
+            };
             events.push(Event::new(
                 platform.clock.stamp(),
                 EventKind::Error,
-                format!(
-                    "{err}. Файл отложен в {}, настройки сброшены",
-                    bad.display()
-                ),
+                format!("{err}. {aside}, настройки сброшены"),
             ));
             Config::default()
         }

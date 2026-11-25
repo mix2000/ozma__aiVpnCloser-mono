@@ -7,6 +7,7 @@ use crate::services::agents::procs_text;
 pub const TITLE_VPN_DOWN: &str = "VPN пропал";
 pub const TITLE_VPN_BACK: &str = "VPN вернулся";
 pub const TITLE_CLOSED: &str = "Агенты закрыты";
+pub const TITLE_NOT_CLOSED: &str = "Не все агенты закрыты";
 pub const TITLE_BLOCKED: &str = "Агент запущен без VPN";
 
 pub const BODY_BACK_IN_COUNTDOWN: &str = "Агенты продолжают работу";
@@ -68,6 +69,18 @@ pub fn close(what: &str, block: bool, dry_run: bool) -> String {
         (false, true) => format!("Закрыл бы: {what}"),
         (true, false) => format!("Запущены без VPN — закрыты: {what}"),
         (false, false) => format!("Закрыто: {what}"),
+    }
+}
+
+/// Уведомление, если закрыть удалось не всех. `closed` — кого удалось.
+pub fn not_closed_notice(closed: Option<&str>, failed: usize) -> String {
+    let failed = format!(
+        "Не удалось закрыть: {}, пробую ещё. Подробности — в журнале",
+        procs_text(failed)
+    );
+    match closed {
+        Some(text) => format!("{text}. {failed}"),
+        None => failed,
     }
 }
 

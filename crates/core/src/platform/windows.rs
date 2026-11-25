@@ -5,7 +5,9 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::windows::process::CommandExt;
 
-use windows_sys::Win32::Foundation::{CloseHandle, ERROR_BUFFER_OVERFLOW, HANDLE, NO_ERROR};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_ACCESS_DENIED, ERROR_BUFFER_OVERFLOW, HANDLE, NO_ERROR,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST,
     IF_TYPE_PPP, IF_TYPE_PROP_VIRTUAL, IF_TYPE_TUNNEL, IP_ADAPTER_ADDRESSES_LH,
@@ -223,8 +225,10 @@ pub fn apply(action: Action, pid: u32) -> io::Result<()> {
 }
 
 pub fn is_alive(pid: u32) -> bool {
-    let Ok(h) = open(pid, PROCESS_QUERY_LIMITED_INFORMATION) else {
-        return false;
+    let h = match open(pid, PROCESS_QUERY_LIMITED_INFORMATION) {
+        Ok(h) => h,
+        // Нет доступа — значит, есть к чему (как EPERM на Unix).
+        Err(e) => return e.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32),
     };
     let mut code = 0u32;
     // SAFETY: валидный хэндл, указатель на локальную переменную.
